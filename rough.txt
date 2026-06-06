@@ -1,0 +1,62 @@
+import feedparser
+import trafilatura
+import json
+from datetime import datetime
+
+def fetch_rss_feed(feed_url):
+    """Parses the RSS feed and extracts article metadata."""
+    print(f"[*] Fetching feed: {feed_url}")
+    feed = feedparser.parse(feed_url)
+    
+    articles = []
+    for entry in feed.entries:
+        # Extract basic info provided by the RSS feed entry
+        article_data = {
+            "title": entry.get("title", "No Title"),
+            "source_url": entry.get("link", ""),
+            "published_date": entry.get("published", ""),
+            "fetched_at": datetime.utcnow().isoformat()
+        }
+        articles.append(article_data)
+        
+    return articles
+
+def scrape_article_content(url):
+    """Downloads a webpage and extracts the clean body text."""
+    print(f"[*] Scraping content from: {url}")
+    try:
+        # Download the HTML payload
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded is None:
+            return "Failed to download content"
+            
+        # Extract main text, discarding ads, footers, and sidebars
+        clean_text = trafilatura.extract(downloaded)
+        return clean_text if clean_text else "No extractable text found"
+        
+    except Exception as e:
+        return f"Error scraping article: {str(e)}"
+
+def run_pipeline():
+    # Example: A standard public news RSS feed (you can change this to SEBI/NSE later)
+    rss_url = "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"
+    
+    # 1. Grab metadata list from the feed
+    discovered_articles = fetch_rss_feed(rss_url)
+    
+    # 2. For prototyping, let's just process the top 3 articles to save time
+    pipeline_results = []
+    for article in discovered_articles[:3]:
+        # Scrape the full text using the URL we found
+        full_text = scrape_article_content(article["source_url"])
+        
+        # Attach the text to our article object
+        article["raw_text"] = full_text
+        pipeline_results.append(article)
+        
+    # 3. Print our structured object to the screen
+    print("\n[+] Ingestion Complete! Sample Output:")
+    print(json.dumps(pipeline_results[0], indent=2))
+
+if __name__ == "__main__":
+    run_pipeline()

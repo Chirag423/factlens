@@ -5,7 +5,7 @@ def ingest_news():
 
     url = 'https://www.thehindu.com/business/Economy/feeder/default.rss'
     rss_metadata = feedparser.parse(url)
-    # Check if feedparser failed or found nothin
+    # Check if feedparser failed or found nothing
     if rss_metadata.bozo:
         print(f"[!] Critical Error: Unable to fetch or parse RSS feed from: {url}", rss_metadata.bozo_exception)
         return # Stop the function completely because we have no data to process
