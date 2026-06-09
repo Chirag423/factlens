@@ -2,4 +2,4 @@
 venv/
 .vscode/
 rough.txt
-prototype.zip
+*.zip
