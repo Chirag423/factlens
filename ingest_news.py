@@ -11,6 +11,7 @@ import time
 async def fetch_single_rss(session, url):
 
     """Fetch and parse one RSS feed. Returns feedparser metadata or None on failure."""
+    """OUT: FeedParserDict  →  .feed (channel info)  +  .entries (list of article objects)"""
 
     print(f"Fetching RSS feed from: {url}")
     try:
@@ -24,8 +25,7 @@ async def fetch_single_rss(session, url):
             
             if rss_metadata.bozo:           # Check if feedparser failed or found nothing
                 print(f"[!] Critical Error: Unable to parse RSS feed from: {url}", rss_metadata.bozo_exception)
-                return None     
-
+                return None  
             return rss_metadata            
     except Exception as e:
         print(f"[!] Critical Error: Exception occurred while fetching RSS feed from: {url} - {e}")
@@ -33,8 +33,29 @@ async def fetch_single_rss(session, url):
     
 # ─── LAYER 2: ARTICLE CONTENT EXTRACTION ─────────────────────────────────────
 
-async def fetch_single_url_trafilatura(session, article_url):
-    print(f"Fetching HTML Page from: {article_url}")
+def enlist_single_rss_articles_metadata(single_rss_metadata) -> list:
+    """Pull metadata (Title, URL, GUID, Published Date, Category) from each feed entry."""
+    """IN:  FeedParserDict  (from fetch_single_rss)
+       OUT: list[dict]  →  [{ title, url, guid, published, category }, ...]  — no body text yet"""
+    
+    return [{
+        'title': entry.get('title', 'N/A'),
+        'url': entry.link,
+        'guid': entry.get('guid', 'N/A'),
+        'published': entry.get('published', 'N/A'),
+        'category': entry.get('category', 'N/A'),
+         
+    } for entry in single_rss_metadata.entries]
+
+
+async def fetch_single_url_trafilatura(session, single_article_metadata :dict):
+    """Fetch one article's HTML and append extracted body text to its metadata dict.
+ 
+    IN:  dict  →  { title, url, guid, published, category }
+    OUT: dict  →  { title, url, guid, published, category, text }  or None on failure"""
+
+    article_url = single_article_metadata['url']
+
     try:
         async with session.get(article_url) as response:
             if response.status != 200:
@@ -43,9 +64,14 @@ async def fetch_single_url_trafilatura(session, article_url):
             
             # Walrus operator (:=) assigns + checks in one step,
             # preventing .as_dict() being called on a None return value
-            if (raw_doc := trafilatura.bare_extraction(await response.text())):
+            # Pass the URL to bare_extraction to improve its internal heuristics
+            if (raw_doc := trafilatura.bare_extraction(await response.text(), url=article_url)) is not None:
                 extracted_data = raw_doc.as_dict()
-                return extracted_data  # Or run your extra dictionary validations here
+
+                # Merge the body text from Trafilatura
+                single_article_metadata['text'] = extracted_data.get('text')
+
+                return single_article_metadata  
             else:
                 print(f"Warning: Trafilatura couldn't extract anything from {article_url}")
                 return None
@@ -53,29 +79,29 @@ async def fetch_single_url_trafilatura(session, article_url):
         print(f"Error processing article : {e}")
         return None
 
-async def fetch_single_rss_trafilatura(session, article_urls: list):
+async def fetch_single_rss_trafilatura(session, single_rss_metadata :list):
 
     """Fetch all articles from one feed simultaneously."""
+    """    IN:  list[dict]       →  [{ title, url, guid, published, category }, ...]
+    OUT: list[dict|None]  →  [{ title, url, guid, published, category, text }, ...]"""
     # One gather() per feed — every article in this feed fetched at the same time
 
-    trafilatura_tasks = [fetch_single_url_trafilatura(session, url) for url in article_urls]
+    trafilatura_tasks = [fetch_single_url_trafilatura(session, single_article_metadata) for single_article_metadata in single_rss_metadata]
     single_rss_content = await asyncio.gather(*trafilatura_tasks)
     return single_rss_content
-
-def enlist_single_rss_urls(rss_metadata) -> list:
-    """Pull all article URLs out of a parsed RSS feed."""
-    return [entry.link for entry in rss_metadata.entries]
 
 # ─── ORCHESTRATOR ─────────────────────────────────────────────────────────────
 # One shared aiohttp session handles all concurrent requests across both phases.
 
 async def fetch_all_feed(feed_urls: list):
+    """Two-phase pipeline: fetch all feeds, then fetch all articles — both fully concurrent.
+ 
+    Phase 1 → all_rss_metadata : list[FeedParserDict|None]   (one per feed URL)
+    Phase 2 → articles per feed enriched with 'text'
+ 
+    OUT: list[list[dict|None]]  →  [[feed1_articles], [feed2_articles], ...]
     """
-    Runs the full async ingestion pipeline in two phases:
-      Phase 1 — Fetch all RSS feeds simultaneously → collect article URL lists
-      Phase 2 — Fetch all article content simultaneously across all feeds
-    Returns: [ [feed1_articles], [feed2_articles], ... ]
-    """
+
     async with aiohttp.ClientSession() as session:
 
 
@@ -87,12 +113,13 @@ async def fetch_all_feed(feed_urls: list):
         article_tasks = []
         for rss_metadata in all_rss_metadata:
             if rss_metadata is not None:
-                article_urls = enlist_single_rss_urls(rss_metadata)
-                article_tasks.append(fetch_single_rss_trafilatura(session, article_urls))
+                articles_metadata = enlist_single_rss_articles_metadata(rss_metadata)
+                article_tasks.append(fetch_single_rss_trafilatura(session, articles_metadata))
 
 
         # All article fetches across all feeds run simultaneously
-        return await asyncio.gather(*article_tasks)
+        return await asyncio.gather(*article_tasks)      # list[list[dict|None]]
+
     
 # ─── ENTRY POINT ──────────────────────────────────────────────────────────────
         

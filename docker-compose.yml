@@ -1,0 +1,15 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb-ha:pg18
+    container_name: factlens_timescale
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=local_dev_password
+      - POSTGRES_DB=factlens_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/home/postgres/pgdata/data
+
+volumes:
+  timescaledb_data:
