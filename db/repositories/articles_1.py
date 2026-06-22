@@ -56,7 +56,9 @@ class ArticleRepository:
     # ------------------------------------------------------------------
 
     def exists(self, url: str) -> bool:
-        """Return True when url is already present."""
+        """
+        Return True when url is already present.
+        """
         with self._conn._tx() as cur:
             cur.execute(
                 "SELECT 1 FROM articles WHERE url = %s LIMIT 1",
@@ -70,7 +72,7 @@ class ArticleRepository:
 
         Returns:
             int: inserted article id
-            None: if article already exists (ON CONFLICT DO NOTHING fired)
+            None: if article already exists
         """
         with self._conn._tx() as cur:
             cur.execute(
@@ -143,34 +145,34 @@ class ArticleRepository:
                 RETURNING id
                 """,
                 {
-                    "url":           article.url,
-                    "title":         article.title,
-                    "category":      article.category,
-                    "fetched_at":    article.fetched_at,
-                    "published_at":  article.published_at,
+                    "url": article.url,
+                    "title": article.title,
+                    "category": article.category,
+                    "fetched_at": article.fetched_at,
+                    "published_at": article.published_at,
                     "source_domain": article.source_domain,
-                    "language":      article.language,
-                    "state":         article.state,
-                    "raw_content":   article.raw_content,
+                    "language": article.language,
+                    "state": article.state,
+                    "raw_content": article.raw_content,
 
-                    "entity_person":      article.entity_person,
-                    "entity_norp":        article.entity_norp,
-                    "entity_fac":         article.entity_fac,
-                    "entity_org":         article.entity_org,
-                    "entity_gpe":         article.entity_gpe,
-                    "entity_loc":         article.entity_loc,
-                    "entity_product":     article.entity_product,
-                    "entity_event":       article.entity_event,
+                    "entity_person": article.entity_person,
+                    "entity_norp": article.entity_norp,
+                    "entity_fac": article.entity_fac,
+                    "entity_org": article.entity_org,
+                    "entity_gpe": article.entity_gpe,
+                    "entity_loc": article.entity_loc,
+                    "entity_product": article.entity_product,
+                    "entity_event": article.entity_event,
                     "entity_work_of_art": article.entity_work_of_art,
-                    "entity_law":         article.entity_law,
-                    "entity_language":    article.entity_language,
-                    "entity_date":        article.entity_date,
-                    "entity_time":        article.entity_time,
-                    "entity_percent":     article.entity_percent,
-                    "entity_money":       article.entity_money,
-                    "entity_quantity":    article.entity_quantity,
-                    "entity_ordinal":     article.entity_ordinal,
-                    "entity_cardinal":    article.entity_cardinal,
+                    "entity_law": article.entity_law,
+                    "entity_language": article.entity_language,
+                    "entity_date": article.entity_date,
+                    "entity_time": article.entity_time,
+                    "entity_percent": article.entity_percent,
+                    "entity_money": article.entity_money,
+                    "entity_quantity": article.entity_quantity,
+                    "entity_ordinal": article.entity_ordinal,
+                    "entity_cardinal": article.entity_cardinal,
 
                     "extra": (
                         psycopg2.extras.Json(article.extra)
@@ -187,11 +189,16 @@ class ArticleRepository:
                 return None
 
             try:
-                art_id = row["id"]   # RealDictCursor
+                art_id = row["id"]  # RealDictCursor
             except (TypeError, KeyError):
-                art_id = row[0]      # plain cursor fallback
+                art_id = row[0]  # regular cursor
 
-            log.debug("article inserted id=%d url=%s", art_id, article.url)
+            log.debug(
+                "article inserted id=%d url=%s",
+                art_id,
+                article.url,
+            )
+
             return art_id
 
     def update_entities(self, article_id: int, entity_data: dict) -> None:
@@ -199,14 +206,17 @@ class ArticleRepository:
         Overwrite the entity_* columns for an existing article.
 
         Only columns whose names appear in ``_VALID_ENTITY_COLUMNS`` are
-        written; any extra keys are silently ignored to prevent SQL injection.
+        written; any extra keys are silently ignored. This prevents SQL
+        injection when the dict is built dynamically from NER output.
 
         Parameters
         ----------
         article_id : int
+            Primary key of the article row to update.
         entity_data : dict
-            ``{column_name: [list_of_strings]}``, e.g.
-            ``{"entity_org": ["Apple"], "entity_person": ["Tim Cook"]}``.
+            Mapping of ``{column_name: [list_of_strings]}``, e.g.
+            ``{"entity_org": ["Apple", "Google"], "entity_person": ["Tim Cook"]}``.
+            Values should be Python lists (stored as Postgres arrays).
         """
         filtered = {
             col: val
@@ -221,6 +231,8 @@ class ArticleRepository:
             )
             return
 
+        # Build "col = %(col)s, …" pairs — safe because every key was checked
+        # against the whitelist above.
         set_clause = ", ".join(f"{col} = %({col})s" for col in filtered)
         params = {**filtered, "_article_id": article_id}
 
@@ -238,13 +250,14 @@ class ArticleRepository:
 
     def update_state(self, article_id: int, state: str) -> None:
         """
-        Update the ``state`` column for a single article.
+        Update the ``state`` column for an existing article.
 
         Parameters
         ----------
         article_id : int
+            Primary key of the article row to update.
         state : str
-            e.g. ``'NER Done'``, ``'Chunking Done'``, ``'Chunking Error'``.
+            New state value, e.g. ``'ner_done'``, ``'pending'``, ``'failed'``.
         """
         with self._conn._tx() as cur:
             cur.execute(
@@ -252,40 +265,16 @@ class ArticleRepository:
                 (state, article_id),
             )
 
-        log.debug("update_state: article_id=%d → state='%s'.", article_id, state)
-
-    def bulk_update_state(self, article_ids: list[int], state: str) -> None:
-        """
-        Bulk-update the ``state`` column for a list of article IDs in a
-        single query.  Significantly faster than calling update_state() in a
-        loop for batches of 50–100 articles.
-
-        Parameters
-        ----------
-        article_ids : list[int]
-            Primary keys of the articles to update.
-        state : str
-            New state value.
-        """
-        if not article_ids:
-            return
-
-        with self._conn._tx() as cur:
-            cur.execute(
-                "UPDATE articles SET state = %s WHERE id = ANY(%s)",
-                (state, article_ids),
-            )
-
         log.debug(
-            "bulk_update_state: %d article(s) → state='%s'.",
-            len(article_ids),
+            "update_state: article_id=%d → state='%s'.",
+            article_id,
             state,
         )
 
     def set_status(self, article_id: int, status: str) -> None:
         """
         Update processing_status.
-        Sets processed_at when status becomes 'processed' or 'embedded'.
+        Sets processed_at when status becomes processed/embedded.
         """
         with self._conn._tx() as cur:
             cur.execute(
@@ -302,89 +291,23 @@ class ArticleRepository:
                 (status, status, article_id),
             )
 
-    def get_by_state(self, state: str, limit: Optional[int] = None) -> list[dict]:
-        """
-        Fetch articles whose ``state`` column equals *state*.
-
-        Parameters
-        ----------
-        state : str
-            e.g. ``'NER Done'``, ``'pending'``.
-        limit : int, optional
-            Cap the result set.  When omitted all matching rows are returned
-            (use with caution on large tables — prefer passing a limit).
-
-        Returns
-        -------
-        list[dict]
-            Each element is a RealDictCursor row containing all article columns.
-        """
+    def get_by_state(self, query: str) -> list[dict]:
         with self._conn._tx() as cur:
-            if limit is not None:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM   articles
-                    WHERE  state = %s
-                    ORDER  BY id
-                    LIMIT  %s
-                    """,
-                    (state, limit),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM   articles
-                    WHERE  state = %s
-                    ORDER  BY id
-                    """,
-                    (state,),
-                )
+            cur.execute(
+                """
+                SELECT *
+                FROM articles
+                WHERE state = %s
+                """,
+                (query,),
+            )
 
             return cur.fetchall()
 
-    def get_urls_by_ids(self, article_ids: list[int]) -> dict[int, str]:
-        """
-        Fetch the ``url`` for each article ID in *article_ids*.
-
-        Used by RetrievalService to populate citations after a hybrid
-        Qdrant search returns ``article_id`` values in the chunk payload.
-
-        Parameters
-        ----------
-        article_ids : list[int]
-            Primary keys of the articles whose URLs are needed.
-
-        Returns
-        -------
-        dict[int, str]
-            Mapping of article_id → url.
-            IDs that do not exist in the table are silently absent from
-            the returned dict (not an error — callers should handle ``""``.
-        """
-        if not article_ids:
-            return {}
-
-        with self._conn._tx() as cur:
-            cur.execute(
-                "SELECT id, url FROM articles WHERE id = ANY(%s)",
-                (article_ids,),
-            )
-            rows = cur.fetchall()
-
-        result: dict[int, str] = {}
-        for row in rows:
-            try:
-                result[row["id"]] = row["url"]   # RealDictCursor
-            except (TypeError, KeyError):
-                result[row[0]] = row[1]           # plain cursor fallback
-
-        log.debug("get_urls_by_ids: fetched %d URL(s).", len(result))
-        return result
-
     def get_pending(self, limit: int = 100) -> list[dict]:
-        """Fetch pending articles for workers (advisory row-lock, SKIP LOCKED)."""
+        """
+        Fetch pending articles for workers.
+        """
         with self._conn._tx() as cur:
             cur.execute(
                 """

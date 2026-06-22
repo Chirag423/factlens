@@ -1,0 +1,28 @@
+services:
+  # 1. Structured Data & Time-Series
+  timescaledb:
+    image: timescale/timescaledb-ha:pg18
+    container_name: factlens_timescale
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=local_dev_password
+      - POSTGRES_DB=factlens_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/home/postgres/pgdata/data
+
+  # 2. Semantic Vector Store
+  qdrant:
+    image: qdrant/qdrant:v1.18.2
+    container_name: factlens_qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+
+volumes:
+  timescaledb_data:
+  qdrant_data:

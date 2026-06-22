@@ -9,24 +9,14 @@ TimescaleDB requires every UNIQUE / PRIMARY KEY on a hypertable to include the
 partition column (fetched_at).  To avoid polluting every FK with that column we:
 
   • Strip inline PRIMARY KEY / UNIQUE from the articles DDL.
-  • Add UNIQUE indexes on (id, fetched_at) and (url, fetched_at) instead.
-  • Keep a plain index on url alone for fast O(log n) existence checks that
-    don't need fetched_at (see ArticleRepository.exists).
+  • Add UNIQUE indexes on (id, fetched_at) and (url_hash, fetched_at) instead.
+  • Keep a plain index on url_hash alone for fast O(log n) existence checks that
+    don't need fetched_at (see ArticleRepository.article_exists).
 
-Parent-child chunking strategy
--------------------------------
-  Parent chunks (paragraph-level) → stored in PostgreSQL (parent_chunks table).
-      parent_id = uuid5(article_id, chunk_index) — deterministic & stable.
-      ON CONFLICT (parent_id) DO NOTHING keeps re-runs idempotent.
-
-  Child chunks (sentence-level) → stored in Qdrant only.
-      Each Qdrant point carries parent_id in its payload so the parent text
-      can be retrieved during answer synthesis.
-
-Dedup strategy recap (articles)
---------------------------------
-  1. exists(url)         → fast pre-check.
-  2. insert_article()    → ON CONFLICT (url, fetched_at) DO NOTHING as
+Dedup strategy recap
+--------------------
+  1. exists(url)         → fast pre-check on idx_articles_guid_only.
+  2. insert_article()    → ON CONFLICT (guid, fetched_at) DO NOTHING as
                            safety-net for same-second races (extremely rare).
 """
 
@@ -44,6 +34,19 @@ log = logging.getLogger(__name__)
 
 _EXTENSION = "CREATE EXTENSION IF NOT EXISTS timescaledb;"
 
+# _FEEDS = """
+# CREATE TABLE IF NOT EXISTS feeds (
+#     id            SERIAL PRIMARY KEY,
+#     url           TEXT        NOT NULL UNIQUE,
+#     name          TEXT,
+#     category      TEXT,
+#     is_active     BOOLEAN     NOT NULL DEFAULT TRUE,
+#     last_fetched  TIMESTAMPTZ,
+#     fetch_errors  INTEGER     NOT NULL DEFAULT 0,
+#     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+# );
+# """
+
 _ARTICLES = """
 CREATE TABLE IF NOT EXISTS articles (
     id                BIGSERIAL NOT NULL,
@@ -54,7 +57,7 @@ CREATE TABLE IF NOT EXISTS articles (
     title             TEXT,
     category          TEXT        NOT NULL,
     published_at      TIMESTAMPTZ,
-    fetched_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    fetched_at        TIMESTAMPTZ NOT NULL DEFAULT NOW() ,
     source_domain     TEXT,
     language          VARCHAR(10) NOT NULL DEFAULT 'en',
     state             TEXT        NOT NULL DEFAULT 'pending',
@@ -62,7 +65,7 @@ CREATE TABLE IF NOT EXISTS articles (
     -- content
     raw_content       TEXT,
 
-    -- named entities (spaCy NER output; one column per label)
+    -- named entities
     entity_person       TEXT[],
     entity_norp         TEXT[],
     entity_fac          TEXT[],
@@ -82,7 +85,7 @@ CREATE TABLE IF NOT EXISTS articles (
     entity_ordinal      TEXT[],
     entity_cardinal     TEXT[],
 
-    -- processing pipeline
+    -- processing
     processing_status TEXT NOT NULL DEFAULT 'pending'
         CHECK (
             processing_status IN (
@@ -100,6 +103,7 @@ CREATE TABLE IF NOT EXISTS articles (
     extra             JSONB,
 
     -- TimescaleDB: UNIQUE must include the partition column (fetched_at).
+    -- articles.py uses ON CONFLICT (guid, fetched_at) DO NOTHING.
     UNIQUE (url, fetched_at)
 );
 """
@@ -117,35 +121,44 @@ SELECT create_hypertable(
 _ENTITIES = """
 CREATE TABLE IF NOT EXISTS entities (
     id             TEXT        PRIMARY KEY,
-    entity_name    TEXT[]      NOT NULL,
+    entity_name           TEXT[]        NOT NULL,
     entity_type    TEXT        NOT NULL,
     UNIQUE (entity_name, entity_type)
 );
 """
 
-_PARENT_CHUNKS = """
-CREATE TABLE IF NOT EXISTS parent_chunks (
-    id           BIGSERIAL   PRIMARY KEY,
+# _ENTITY_MENTIONS = """
+# CREATE TABLE IF NOT EXISTS entity_mentions (
+#     id            BIGSERIAL   PRIMARY KEY,
+#     article_id    BIGINT      NOT NULL,
+#     entity_id     INTEGER     NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+#     mention_text  TEXT,
+#     mention_count INTEGER     NOT NULL DEFAULT 1,
+#     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+#     UNIQUE (article_id, entity_id)
+# );
+# """
 
-    -- Deterministic UUID-v5: uuid5(article_id || chunk_index).
-    -- Used as the parent_id reference in Qdrant child-chunk payloads.
-    parent_id    TEXT        NOT NULL,
+# NOTE: entity_mentions.article_id has no FK to articles(id).
+# PostgreSQL does not allow FKs referencing a hypertable column that is only
+# covered by a UNIQUE INDEX (not a UNIQUE CONSTRAINT). Referential integrity is
+# maintained at the application layer.
 
-    article_id   BIGINT      NOT NULL,   -- references articles(id) at app layer
-    chunk_index  INTEGER     NOT NULL,   -- 0-based position within the article
-    content      TEXT        NOT NULL,
-
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    UNIQUE (parent_id),
-    UNIQUE (article_id, chunk_index)
-);
-"""
-
-# NOTE: chunks.article_id and parent_chunks.article_id have no FK to
-# articles(id) because PostgreSQL does not allow FKs referencing a hypertable
-# column that is only covered by a UNIQUE INDEX (not a UNIQUE CONSTRAINT).
-# Referential integrity is maintained at the application layer.
+# _ENTITY_RELATIONS = """
+# CREATE TABLE IF NOT EXISTS entity_relations (
+#     id                   BIGSERIAL PRIMARY KEY,
+#     from_entity_id       INTEGER   NOT NULL REFERENCES entities(id),
+#     relation_type        TEXT      NOT NULL,
+#     to_entity_id         INTEGER   NOT NULL REFERENCES entities(id),
+#     confidence           REAL      NOT NULL DEFAULT 0.5,
+#     weight               INTEGER   NOT NULL DEFAULT 1,
+#     first_seen           TIMESTAMPTZ,
+#     last_seen            TIMESTAMPTZ,
+#     evidence_article_ids BIGINT[]  NOT NULL DEFAULT '{}',
+#     extra                JSONB,
+#     UNIQUE (from_entity_id, relation_type, to_entity_id)
+# );
+# """
 
 _CHUNKS = """
 CREATE TABLE IF NOT EXISTS chunks (
@@ -159,24 +172,32 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 """
 
+# NOTE: chunks.article_id also has no FK for the same reason as entity_mentions.
+
 _INDEXES: list[str] = [
-    # TimescaleDB-compatible unique index (must include partition column)
+    # TimescaleDB-compatible unique indexes (must include partition column)
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_id_fetched        ON articles (id, fetched_at);",
+    # "CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_guid_fetched      ON articles (guid, fetched_at);",
+    # Plain index for fast existence checks (no fetched_at needed)
+    # "CREATE INDEX        IF NOT EXISTS idx_articles_guid_only         ON articles (guid);",
     # Standard lookup indexes
     "CREATE INDEX        IF NOT EXISTS idx_articles_fetched_at        ON articles (fetched_at);",
     "CREATE INDEX        IF NOT EXISTS idx_articles_published_at      ON articles (published_at);",
-    "CREATE INDEX        IF NOT EXISTS idx_articles_state             ON articles (state);",
+    # "CREATE INDEX        IF NOT EXISTS idx_articles_feed_id           ON articles (feed_id);",
     "CREATE INDEX        IF NOT EXISTS idx_articles_processing_status ON articles (processing_status);",
     "CREATE INDEX        IF NOT EXISTS idx_articles_source_domain     ON articles (source_domain);",
-    # Parent chunks — fast lookup by article for re-run dedup checks
-    "CREATE INDEX        IF NOT EXISTS idx_parent_chunks_article_id   ON parent_chunks (article_id);",
+    # "CREATE INDEX        IF NOT EXISTS idx_entity_mentions_article_id ON entity_mentions (article_id);",
+    # "CREATE INDEX        IF NOT EXISTS idx_entity_mentions_entity_id  ON entity_mentions (entity_id);",
+    # "CREATE INDEX        IF NOT EXISTS idx_entity_relations_from      ON entity_relations (from_entity_id);",
+    # "CREATE INDEX        IF NOT EXISTS idx_entity_relations_to        ON entity_relations (to_entity_id);",
+    # "CREATE INDEX        IF NOT EXISTS idx_chunks_article_id          ON chunks (article_id);",
+    # "CREATE INDEX        IF NOT EXISTS idx_chunks_is_embedded         ON chunks (is_embedded);",
 ]
 
 _DROP_ALL = """
-DROP TABLE IF EXISTS parent_chunks     CASCADE;
-DROP TABLE IF EXISTS chunks            CASCADE;
 DROP TABLE IF EXISTS entities          CASCADE;
 DROP TABLE IF EXISTS articles          CASCADE;
+
 """
 
 
@@ -219,11 +240,13 @@ class SchemaManager:
         """Create all tables, hypertable, and indexes. Idempotent — safe on every startup."""
         log.info("Deploying schema...")
         self._run_ddl(_EXTENSION,           "extension timescaledb")
+        # self._run_ddl(_FEEDS,               "table feeds")
         self._run_ddl(_ARTICLES,            "table articles")
         self._run_ddl(_ARTICLES_HYPERTABLE, "hypertable articles")
         self._run_ddl(_ENTITIES,            "table entities")
+        # self._run_ddl(_ENTITY_MENTIONS,     "table entity_mentions")
+        # self._run_ddl(_ENTITY_RELATIONS,    "table entity_relations")
         self._run_ddl(_CHUNKS,              "table chunks")
-        self._run_ddl(_PARENT_CHUNKS,       "table parent_chunks")
         for stmt in _INDEXES:
             label = stmt.split("idx_")[1].split(" ")[0] if "idx_" in stmt else stmt[:50]
             self._run_ddl(stmt, f"index {label}")

@@ -36,8 +36,33 @@ FEEDS = [
     ("Business", "https://www.thehindu.com/business/feeder/default.rss"),
     ("Science",  "https://www.thehindu.com/sci-tech/science/feeder/default.rss"),
     ("Economy",  "https://www.thehindu.com/business/Economy/feeder/default.rss"),
+    
+    # Times of India Feeds
+    ("TOI Feed (-2128672765)", "https://timesofindia.indiatimes.com/rssfeeds/-2128672765.cms"),
+    ("TOI Top Stories",        "https://timesofindia.indiatimes.com/rssfeedstopstories.cms"),
+    ("TOI Most Recent",        "https://timesofindia.indiatimes.com/rssfeedmostrecent.cms"),
+    ("TOI Feed (-2128936835)", "https://timesofindia.indiatimes.com/rssfeeds/-2128936835.cms"),
+    ("TOI Feed (296589292)",   "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms"),
+    ("TOI Feed (7098551)",     "https://timesofindia.indiatimes.com/rssfeeds/7098551.cms"),
+    ("TOI Feed (1898055)",     "https://timesofindia.indiatimes.com/rssfeeds/1898055.cms"),
+    ("TOI US Feed (72258322)", "https://timesofindia.indiatimes.com/rssfeeds_us/72258322.cms"),
+    ("TOI Feed (54829575)",    "https://timesofindia.indiatimes.com/rssfeeds/54829575.cms"),
+    ("TOI Feed (4719148)",     "https://timesofindia.indiatimes.com/rssfeeds/4719148.cms"),
+    ("TOI Feed (2647163)",     "https://timesofindia.indiatimes.com/rssfeeds/2647163.cms"),
+    ("TOI Feed (66949542)",    "https://timesofindia.indiatimes.com/rssfeeds/66949542.cms"),
+    ("TOI Feed (913168846)",   "https://timesofindia.indiatimes.com/rssfeeds/913168846.cms"),
+    ("TOI Feed (1081479906)",  "https://timesofindia.indiatimes.com/rssfeeds/1081479906.cms"),
+    ("TOI Feed (2886704)",     "https://timesofindia.indiatimes.com/rssfeeds/2886704.cms"),
+    ("TOI Most Read",          "https://timesofindia.indiatimes.com/rssfeedmostread.cms"),
+    ("TOI Most Shared",        "https://timesofindia.indiatimes.com/rssfeedmostshared.cms"),
+    ("TOI Most Commented",     "https://timesofindia.indiatimes.com/rssfeedmostcommented.cms"),
+    
+    # The Hindu Feeds (Duplicates removed)
+    ("Sport",                  "https://www.thehindu.com/sport/feeder/default.rss"),
+    ("News",                   "https://www.thehindu.com/news/feeder/default.rss"),
+    ("Entertainment",          "https://www.thehindu.com/entertainment/feeder/default.rss"),
+    ("Life & Style",           "https://www.thehindu.com/life-and-style/feeder/default.rss"),
 ]
-
 # A realistic browser User-Agent prevents CDN blocks (fixes Bug 4)
 HEADERS = {
     "User-Agent": (
